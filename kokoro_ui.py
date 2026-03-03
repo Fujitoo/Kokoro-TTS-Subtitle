@@ -17,27 +17,7 @@ ALL_VOICES = []
 for category, voices in VOICE_OPTIONS.items():
     ALL_VOICES.extend(voices)
 
-
-def create_speaker_card(speaker_id, speaker_name="", selected_voice="af_heart"):
-    """Create a speaker card with name input and voice dropdown."""
-    with gr.Row(variant="panel", elem_classes="speaker-card"):
-        with gr.Column(scale=1):
-            name_input = gr.Textbox(
-                label="Speaker Name",
-                value=speaker_name,
-                placeholder=f"Speaker {speaker_id}",
-                elem_id=f"speaker_name_{speaker_id}"
-            )
-        with gr.Column(scale=2):
-            voice_dropdown = gr.Dropdown(
-                label="Voice",
-                choices=ALL_VOICES,
-                value=selected_voice,
-                elem_id=f"speaker_voice_{speaker_id}"
-            )
-        with gr.Column(scale=0.5, min_width=100):
-            remove_btn = gr.Button("Remove", variant="secondary", size="sm")
-    return name_input, voice_dropdown, remove_btn
+MAX_SPEAKERS = 10
 
 
 def parse_script(script_text):
@@ -67,82 +47,115 @@ def get_unique_speakers(script_lines):
     return unique_speakers
 
 
-def update_speaker_cards(script_text, current_speakers):
-    """Update speaker cards based on script text."""
+def build_speaker_data(script_text, current_data):
+    """Build speaker data from script, preserving existing voice assignments."""
     script_lines = parse_script(script_text)
     unique_speakers = get_unique_speakers(script_lines)
     
-    # Only update if speakers changed
-    if len(unique_speakers) == len(current_speakers):
-        if all(unique_speakers[i] == current_speakers[i] for i in range(len(unique_speakers))):
-            return [gr.update() for _ in range(len(current_speakers) * 3)]
+    # Create new speaker list, preserving voices for existing speakers
+    new_data = []
+    for name in unique_speakers[:MAX_SPEAKERS]:
+        # Find existing voice for this speaker
+        voice = "af_heart"
+        for existing in current_data:
+            if existing["name"] == name:
+                voice = existing["voice"]
+                break
+        new_data.append({"name": name, "voice": voice})
     
-    # Build new speaker cards
+    return new_data
+
+
+def update_speaker_ui(script_text, speaker_data):
+    """Update speaker cards visibility and values based on script."""
+    new_data = build_speaker_data(script_text, speaker_data)
+    
+    # Build updates for all MAX_SPEAKERS cards
     updates = []
-    for i, speaker_name in enumerate(unique_speakers):
-        updates.extend([
-            gr.update(value=speaker_name),  # name input
-            gr.update(value="af_heart"),     # voice dropdown
-            gr.update(visible=True)          # remove button
-        ])
+    for i in range(MAX_SPEAKERS):
+        if i < len(new_data):
+            updates.extend([
+                gr.update(value=new_data[i]["name"], visible=True),  # name
+                gr.update(value=new_data[i]["voice"], visible=True),  # voice
+                gr.update(visible=True)  # remove btn
+            ])
+        else:
+            updates.extend([
+                gr.update(value="", visible=False),
+                gr.update(value="af_heart", visible=False),
+                gr.update(visible=False)
+            ])
     
-    # Hide extra cards if any
-    remaining = max(0, len(current_speakers) - len(unique_speakers))
-    for _ in range(remaining):
-        updates.extend([
-            gr.update(value=""),
-            gr.update(value="af_heart"),
-            gr.update(visible=False)
-        ])
-    
+    return new_data, updates
+
+
+def add_speaker(speaker_data):
+    """Add a new empty speaker slot."""
+    if len(speaker_data) < MAX_SPEAKERS:
+        new_num = len(speaker_data) + 1
+        speaker_data.append({"name": f"Speaker {new_num}", "voice": "af_heart"})
+    return speaker_data, build_ui_updates(speaker_data)
+
+
+def remove_speaker(speaker_data, index):
+    """Remove a speaker at the given index."""
+    if 0 <= index < len(speaker_data):
+        speaker_data.pop(index)
+    return speaker_data, build_ui_updates(speaker_data)
+
+
+def build_ui_updates(speaker_data):
+    """Build UI updates for all speaker cards."""
+    updates = []
+    for i in range(MAX_SPEAKERS):
+        if i < len(speaker_data):
+            updates.extend([
+                gr.update(value=speaker_data[i]["name"], visible=True),
+                gr.update(value=speaker_data[i]["voice"], visible=True),
+                gr.update(visible=True)
+            ])
+        else:
+            updates.extend([
+                gr.update(value="", visible=False),
+                gr.update(value="af_heart", visible=False),
+                gr.update(visible=False)
+            ])
     return updates
 
 
-def add_speaker(speaker_list):
-    """Add a new speaker to the list."""
-    new_id = len(speaker_list) + 1
-    speaker_list.append({"id": new_id, "name": f"Speaker {new_id}", "voice": "af_heart"})
-    return speaker_list, speaker_list
+def update_speaker_name(speaker_data, index, new_name):
+    """Update a speaker's name."""
+    if 0 <= index < len(speaker_data):
+        speaker_data[index]["name"] = new_name
+    return speaker_data
 
 
-def remove_speaker(speaker_list, index):
-    """Remove a speaker at the given index."""
-    if 0 <= index < len(speaker_list):
-        speaker_list.pop(index)
-        # Re-index
-        for i, speaker in enumerate(speaker_list):
-            speaker["id"] = i + 1
-    return speaker_list, speaker_list
+def update_speaker_voice(speaker_data, index, new_voice):
+    """Update a speaker's voice."""
+    if 0 <= index < len(speaker_data):
+        speaker_data[index]["voice"] = new_voice
+    return speaker_data
 
 
 def generate_single_audio(text, voice, speaker_name):
-    """Generate audio for single speaker mode (placeholder)."""
+    """Generate audio for single speaker mode."""
     if not text.strip():
         return None
-    # Placeholder - integrate with actual Kokoro TTS
+    # TODO: Integrate with actual Kokoro TTS
+    print(f"Single Speaker - Voice: {voice}, Text: {text[:50]}...")
     return None
 
 
-def generate_multi_audio(script_text, speaker_list):
-    """Generate audio for multi speaker mode (placeholder)."""
+def generate_multi_audio(script_text, speaker_data):
+    """Generate audio for multi speaker mode."""
     if not script_text.strip():
         return None
-    # Placeholder - integrate with actual Kokoro TTS
+    # TODO: Integrate with actual Kokoro TTS
+    print(f"Multi Speaker - {len(speaker_data)} speakers:")
+    for s in speaker_data:
+        print(f"  {s['name']}: {s['voice']}")
+    print(f"Script: {script_text[:100]}...")
     return None
-
-
-def render_speaker_cards(speaker_list):
-    """Render speaker cards from speaker list."""
-    cards = []
-    for speaker in speaker_list:
-        with gr.Group():
-            name, voice, remove = create_speaker_card(
-                speaker["id"],
-                speaker["name"],
-                speaker["voice"]
-            )
-            cards.append((name, voice, remove, speaker["id"]))
-    return cards
 
 
 # Build the Gradio UI
@@ -253,10 +266,7 @@ with gr.Blocks(
         # ==================== MULTI SPEAKER TAB ====================
         with gr.TabItem("👥 Multi Speaker", id="multi"):
             # State to track speakers
-            speaker_state = gr.State([
-                {"id": 1, "name": "Speaker 1", "voice": "af_heart"},
-                {"id": 2, "name": "Speaker 2", "voice": "af_bella"}
-            ])
+            speaker_state = gr.State([])
             
             # Script input area
             with gr.Row():
@@ -273,21 +283,44 @@ with gr.Blocks(
                 with gr.Column(scale=1):
                     gr.Markdown("### 🎛️ Voice Settings")
                     
-                    # Container for speaker cards
-                    with gr.Group() as speaker_container:
-                        # Initial speaker cards
-                        speaker_cards = []
-                        for i in range(2):
-                            with gr.Group():
-                                name, voice, remove = create_speaker_card(i + 1)
-                                speaker_cards.append((name, voice, remove, i + 1))
+                    # Fixed speaker cards (MAX_SPEAKERS)
+                    speaker_cards_ui = []
+                    for i in range(MAX_SPEAKERS):
+                        with gr.Group(visible=(i < 2)) as card_group:
+                            with gr.Row(variant="panel", elem_classes="speaker-card"):
+                                with gr.Column(scale=1):
+                                    name_input = gr.Textbox(
+                                        label="Speaker Name",
+                                        value=f"Speaker {i+1}" if i < 2 else "",
+                                        placeholder=f"Speaker {i+1}",
+                                        visible=(i < 2)
+                                    )
+                                with gr.Column(scale=2):
+                                    voice_dropdown = gr.Dropdown(
+                                        label="Voice",
+                                        choices=ALL_VOICES,
+                                        value="af_heart",
+                                        visible=(i < 2)
+                                    )
+                                with gr.Column(scale=0.5, min_width=100):
+                                    remove_btn = gr.Button(
+                                        "🗑️",
+                                        variant="secondary",
+                                        size="sm",
+                                        visible=(i < 2)
+                                    )
+                            speaker_cards_ui.append({
+                                "group": card_group,
+                                "name": name_input,
+                                "voice": voice_dropdown,
+                                "remove": remove_btn
+                            })
                     
-                    with gr.Row():
-                        add_speaker_btn = gr.Button(
-                            "➕ Add Speaker",
-                            variant="secondary",
-                            size="sm"
-                        )
+                    add_speaker_btn = gr.Button(
+                        "➕ Add Speaker",
+                        variant="secondary",
+                        size="sm"
+                    )
             
             # Generate button and audio output
             with gr.Row():
@@ -304,16 +337,65 @@ with gr.Blocks(
                 show_download_button=True
             )
             
-            # Event handlers
-            def update_multi_speakers(speaker_list):
-                """Update the speaker cards UI based on speaker list."""
-                return speaker_list
+            # Initialize speaker state on load
+            def init_speakers():
+                initial = [
+                    {"name": "Speaker 1", "voice": "af_heart"},
+                    {"name": "Speaker 2", "voice": "af_bella"}
+                ]
+                return initial
             
+            demo.load(
+                fn=init_speakers,
+                outputs=[speaker_state]
+            )
+            
+            # Update UI when script changes
+            multi_script.change(
+                fn=update_speaker_ui,
+                inputs=[multi_script, speaker_state],
+                outputs=[speaker_state] + [comp for i in range(MAX_SPEAKERS) for comp in [
+                    speaker_cards_ui[i]["name"],
+                    speaker_cards_ui[i]["voice"],
+                    speaker_cards_ui[i]["remove"]
+                ]]
+            )
+            
+            # Add speaker button
             add_speaker_btn.click(
                 fn=add_speaker,
                 inputs=[speaker_state],
-                outputs=[speaker_state, speaker_state]
+                outputs=[speaker_state] + [comp for i in range(MAX_SPEAKERS) for comp in [
+                    speaker_cards_ui[i]["name"],
+                    speaker_cards_ui[i]["voice"],
+                    speaker_cards_ui[i]["remove"]
+                ]]
             )
+            
+            # Wire up name/voice changes and remove buttons
+            for i in range(MAX_SPEAKERS):
+                # Update name
+                speaker_cards_ui[i]["name"].change(
+                    fn=update_speaker_name,
+                    inputs=[speaker_state, gr.Number(value=i, visible=False), speaker_cards_ui[i]["name"]],
+                    outputs=[speaker_state]
+                )
+                # Update voice
+                speaker_cards_ui[i]["voice"].change(
+                    fn=update_speaker_voice,
+                    inputs=[speaker_state, gr.Number(value=i, visible=False), speaker_cards_ui[i]["voice"]],
+                    outputs=[speaker_state]
+                )
+                # Remove speaker
+                speaker_cards_ui[i]["remove"].click(
+                    fn=lambda data, idx=i: remove_speaker(data, idx),
+                    inputs=[speaker_state],
+                    outputs=[speaker_state] + [comp for j in range(MAX_SPEAKERS) for comp in [
+                        speaker_cards_ui[j]["name"],
+                        speaker_cards_ui[j]["voice"],
+                        speaker_cards_ui[j]["remove"]
+                    ]]
+                )
             
             multi_generate.click(
                 fn=generate_multi_audio,
