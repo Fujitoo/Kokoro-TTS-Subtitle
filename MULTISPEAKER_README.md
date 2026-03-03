@@ -207,9 +207,6 @@ output_path, audio_array = create_multispeaker_audio(
 
 Planned features:
 - [ ] Per-speaker speed control
-- [ ] Emotion/expression tags
-- [ ] Voice cloning support
-- [ ] Background music/sound effects
 - [ ] Export to multiple formats (MP3, OGG)
 - [ ] Real-time preview
 - [ ] Speaker timeline visualization
