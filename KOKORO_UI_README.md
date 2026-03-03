@@ -1,6 +1,6 @@
 # Kokoro TTS Studio - Colab Notebook
 
-[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/NeuralFalconYT/Kokoro-TTS-Subtitle/blob/development/kokoro_ui.ipynb)
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Fujitoo/Kokoro-TTS-Subtitle/blob/development/kokoro_ui.ipynb)
 
 ## Quick Start
 
