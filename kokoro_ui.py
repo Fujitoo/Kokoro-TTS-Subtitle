@@ -1,9 +1,14 @@
 """
 Kokoro TTS Gradio UI - Dark Theme
 Inspired by Google AI Studio's speech playground layout
+Integrates with multispeaker.py backend for audio generation
 """
 
 import gradio as gr
+from multispeaker import (
+    process_multispeaker_script,
+    get_voice_names
+)
 
 # All available Kokoro voices organized by category
 VOICE_OPTIONS = {
@@ -20,64 +25,45 @@ for category, voices in VOICE_OPTIONS.items():
 MAX_SPEAKERS = 10
 
 
-def parse_script(script_text):
-    """Parse the script text into speaker lines."""
-    if not script_text.strip():
-        return []
-    
-    lines = []
-    for line in script_text.strip().split('\n'):
-        if ':' in line:
-            parts = line.split(':', 1)
-            speaker = parts[0].strip()
-            text = parts[1].strip() if len(parts) > 1 else ""
-            lines.append({"speaker": speaker, "text": text})
-    return lines
-
-
-def get_unique_speakers(script_lines):
-    """Extract unique speakers from script lines in order of appearance."""
-    seen = set()
-    unique_speakers = []
-    for line in script_lines:
-        speaker = line["speaker"]
-        if speaker not in seen:
-            seen.add(speaker)
-            unique_speakers.append(speaker)
-    return unique_speakers
-
-
 def build_speaker_data(script_text, current_data):
     """Build speaker data from script, preserving existing voice assignments."""
-    script_lines = parse_script(script_text)
-    unique_speakers = get_unique_speakers(script_lines)
+    if not script_text.strip():
+        return [{"name": f"Speaker {i+1}", "voice": ALL_VOICES[i % len(ALL_VOICES)]} for i in range(2)]
     
-    # Create new speaker list, preserving voices for existing speakers
-    new_data = []
-    for name in unique_speakers[:MAX_SPEAKERS]:
-        # Find existing voice for this speaker
-        voice = "af_heart"
-        for existing in current_data:
-            if existing["name"] == name:
-                voice = existing["voice"]
-                break
-        new_data.append({"name": name, "voice": voice})
+    speakers = []
+    seen = set()
+    for line in script_text.strip().split('\n'):
+        if ':' in line:
+            speaker = line.split(':', 1)[0].strip()
+            if speaker not in seen and speaker:
+                seen.add(speaker)
+                # Preserve existing voice or assign new one
+                voice = "af_heart"
+                for existing in current_data:
+                    if existing["name"] == speaker:
+                        voice = existing["voice"]
+                        break
+                speakers.append({"name": speaker, "voice": voice})
     
-    return new_data
+    # Ensure at least 2 speakers
+    while len(speakers) < 2:
+        num = len(speakers) + 1
+        speakers.append({"name": f"Speaker {num}", "voice": ALL_VOICES[(num-1) % len(ALL_VOICES)]})
+    
+    return speakers[:MAX_SPEAKERS]
 
 
 def update_speaker_ui(script_text, speaker_data):
     """Update speaker cards visibility and values based on script."""
     new_data = build_speaker_data(script_text, speaker_data)
     
-    # Build updates for all MAX_SPEAKERS cards
     updates = []
     for i in range(MAX_SPEAKERS):
         if i < len(new_data):
             updates.extend([
-                gr.update(value=new_data[i]["name"], visible=True),  # name
-                gr.update(value=new_data[i]["voice"], visible=True),  # voice
-                gr.update(visible=True)  # remove btn
+                gr.update(value=new_data[i]["name"], visible=True),
+                gr.update(value=new_data[i]["voice"], visible=True),
+                gr.update(visible=True)
             ])
         else:
             updates.extend([
@@ -125,8 +111,8 @@ def build_ui_updates(speaker_data):
 
 def update_speaker_name(speaker_data, index, new_name):
     """Update a speaker's name."""
-    if 0 <= index < len(speaker_data):
-        speaker_data[index]["name"] = new_name
+    if 0 <= index < len(speaker_data) and new_name.strip():
+        speaker_data[index]["name"] = new_name.strip()
     return speaker_data
 
 
@@ -137,25 +123,54 @@ def update_speaker_voice(speaker_data, index, new_voice):
     return speaker_data
 
 
+def speaker_data_to_config(speaker_data):
+    """Convert speaker data to config string for multispeaker.py backend."""
+    return '\n'.join([f"{s['name']}:{s['voice']}" for s in speaker_data])
+
+
 def generate_single_audio(text, voice, speaker_name):
-    """Generate audio for single speaker mode."""
+    """Generate audio for single speaker mode using multispeaker backend."""
     if not text.strip():
-        return None
-    # TODO: Integrate with actual Kokoro TTS
-    print(f"Single Speaker - Voice: {voice}, Text: {text[:50]}...")
-    return None
+        return None, "Please enter text"
+    
+    config = f"{speaker_name or 'Speaker'}:{voice}"
+    script = f"{speaker_name or 'Speaker'}: {text}"
+    
+    try:
+        output_path, _, info = process_multispeaker_script(
+            script_text=script,
+            speaker_config_text=config,
+            language="American English",
+            speed=1.0,
+            pause_duration=0.2,
+            normalize_audio=True,
+            auto_translate=False
+        )
+        return output_path, f"✅ Generated with {voice}"
+    except Exception as e:
+        return None, f"❌ Error: {str(e)}"
 
 
 def generate_multi_audio(script_text, speaker_data):
-    """Generate audio for multi speaker mode."""
+    """Generate audio for multi speaker mode using multispeaker backend."""
     if not script_text.strip():
-        return None
-    # TODO: Integrate with actual Kokoro TTS
-    print(f"Multi Speaker - {len(speaker_data)} speakers:")
-    for s in speaker_data:
-        print(f"  {s['name']}: {s['voice']}")
-    print(f"Script: {script_text[:100]}...")
-    return None
+        return None, "Please enter script text"
+    
+    config = speaker_data_to_config(speaker_data)
+    
+    try:
+        output_path, _, info = process_multispeaker_script(
+            script_text=script_text,
+            speaker_config_text=config,
+            language="American English",
+            speed=1.0,
+            pause_duration=0.2,
+            normalize_audio=True,
+            auto_translate=False
+        )
+        return output_path, info
+    except Exception as e:
+        return None, f"❌ Error: {str(e)}"
 
 
 # Build the Gradio UI
@@ -256,19 +271,21 @@ with gr.Blocks(
                         type="filepath",
                         show_download_button=True
                     )
+                    single_info = gr.Markdown("")
             
             single_generate.click(
                 fn=generate_single_audio,
                 inputs=[single_text, single_voice, single_speaker],
-                outputs=[single_audio]
+                outputs=[single_audio, single_info]
             )
         
         # ==================== MULTI SPEAKER TAB ====================
         with gr.TabItem("👥 Multi Speaker", id="multi"):
-            # State to track speakers
-            speaker_state = gr.State([])
+            speaker_state = gr.State([
+                {"name": "Speaker 1", "voice": "af_bella"},
+                {"name": "Speaker 2", "voice": "bf_isabella"}
+            ])
             
-            # Script input area
             with gr.Row():
                 with gr.Column(scale=1):
                     gr.Markdown("### 📝 Script")
@@ -283,7 +300,6 @@ with gr.Blocks(
                 with gr.Column(scale=1):
                     gr.Markdown("### 🎛️ Voice Settings")
                     
-                    # Fixed speaker cards (MAX_SPEAKERS)
                     speaker_cards_ui = []
                     for i in range(MAX_SPEAKERS):
                         with gr.Group(visible=(i < 2)) as card_group:
@@ -322,7 +338,6 @@ with gr.Blocks(
                         size="sm"
                     )
             
-            # Generate button and audio output
             with gr.Row():
                 multi_generate = gr.Button(
                     "🎵 Generate Audio",
@@ -331,24 +346,13 @@ with gr.Blocks(
                     elem_classes="generate-btn"
                 )
             
-            multi_audio = gr.Audio(
-                label="Generated Audio",
-                type="filepath",
-                show_download_button=True
-            )
-            
-            # Initialize speaker state on load
-            def init_speakers():
-                initial = [
-                    {"name": "Speaker 1", "voice": "af_heart"},
-                    {"name": "Speaker 2", "voice": "af_bella"}
-                ]
-                return initial
-            
-            demo.load(
-                fn=init_speakers,
-                outputs=[speaker_state]
-            )
+            with gr.Row():
+                multi_audio = gr.Audio(
+                    label="Generated Audio",
+                    type="filepath",
+                    show_download_button=True
+                )
+                multi_info = gr.Markdown("", label="Generation Info")
             
             # Update UI when script changes
             multi_script.change(
@@ -374,19 +378,16 @@ with gr.Blocks(
             
             # Wire up name/voice changes and remove buttons
             for i in range(MAX_SPEAKERS):
-                # Update name
                 speaker_cards_ui[i]["name"].change(
                     fn=update_speaker_name,
                     inputs=[speaker_state, gr.Number(value=i, visible=False), speaker_cards_ui[i]["name"]],
                     outputs=[speaker_state]
                 )
-                # Update voice
                 speaker_cards_ui[i]["voice"].change(
                     fn=update_speaker_voice,
                     inputs=[speaker_state, gr.Number(value=i, visible=False), speaker_cards_ui[i]["voice"]],
                     outputs=[speaker_state]
                 )
-                # Remove speaker
                 speaker_cards_ui[i]["remove"].click(
                     fn=lambda data, idx=i: remove_speaker(data, idx),
                     inputs=[speaker_state],
@@ -400,7 +401,7 @@ with gr.Blocks(
             multi_generate.click(
                 fn=generate_multi_audio,
                 inputs=[multi_script, speaker_state],
-                outputs=[multi_audio]
+                outputs=[multi_audio, multi_info]
             )
     
     # Footer
