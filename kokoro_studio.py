@@ -1,13 +1,13 @@
 """
-Kokoro TTS Studio - Clean Gradio UI for Kokoro TTS
+Kokoro TTS Studio - Gradio UI for Kokoro TTS
 Three tabs: Single Speaker, Multi Speaker – Raw Text, SRT Dubbing
+Multi Speaker uses same voice dropdown pattern as multispeaker.py
 """
 
 import os
 import re
 import uuid
 import wave
-import json
 import numpy as np
 from kokoro import KPipeline
 from huggingface_hub import list_repo_files
@@ -20,20 +20,6 @@ last_used_language = "a"
 pipeline = KPipeline(lang_code=last_used_language)
 temp_folder = "./kokoro_output"
 os.makedirs(temp_folder, exist_ok=True)
-
-VOICE_CATEGORIES = {
-    "American Female": ["af_heart", "af_bella", "af_nicole", "af_aoede", "af_sky", "af_sarah", "af_nova", "af_river"],
-    "American Male": ["am_adam", "am_michael", "am_echo", "am_eric", "am_liam", "am_onyx"],
-    "British Female": ["bf_emma", "bf_isabella", "bf_alice", "bf_lily"],
-    "British Male": ["bm_george", "bm_lewis", "bm_daniel", "bm_fable"],
-    "Hindi": ["hf_alpha", "hf_beta"],
-    "Spanish": ["ef_dora", "em_alex"],
-    "French": ["ff_siwis", "fm_remy"],
-    "Italian": ["if_sara", "im_marco"],
-    "Brazilian Portuguese": ["pf_dora", "pm_rafael"],
-    "Japanese": ["jf_nezumi", "jm_kumo"],
-    "Mandarin Chinese": ["zf_xiaoni", "zm_yunjian"],
-}
 
 LANGUAGE_MAP = {
     "American English": "a", "British English": "b", "Hindi": "h", "Spanish": "e",
@@ -52,7 +38,9 @@ def get_voice_names(repo_id="hexgrad/Kokoro-82M"):
         return sorted([os.path.splitext(f.replace("voices/", ""))[0] 
                       for f in list_repo_files(repo_id) if f.startswith("voices/")])
     except:
-        return [v for voices in VOICE_CATEGORIES.values() for v in voices]
+        return ["af_bella", "af_nicole", "af_heart", "am_adam", "am_michael", 
+                "bf_isabella", "bf_emma", "bm_george", "hf_alpha", "ef_dora", 
+                "ff_siwis", "if_sara", "pf_dora", "jf_nezumi", "zf_xiaoni"]
 
 def clean_text(text):
     replacements = {"–": " ", "-": " ", "**": " ", "*": " ", "#": " "}
@@ -208,7 +196,7 @@ def process_single_speaker(text, voice, speaker_name, language, speed, auto_tran
 
 def parse_raw_script(script_text):
     lines = []
-    speakers = set()
+    speakers = []
     for line in script_text.strip().split('\n'):
         line = line.strip()
         if not line:
@@ -221,30 +209,45 @@ def parse_raw_script(script_text):
         if match:
             speaker = match.group(1).strip()
             text = match.group(2).strip()
-            speakers.add(speaker)
+            if speaker not in speakers:
+                speakers.append(speaker)
             lines.append({"speaker": speaker, "text": text, "pause": None})
         elif lines and lines[-1]["speaker"] != "_PAUSE_":
             lines[-1]["text"] += " " + line
-    return lines, [s for s in speakers if s != "_PAUSE_"]
+    return lines, speakers
 
-def process_raw_text_multispeaker(script_text, speaker_config_text, language, speed, pause_duration, normalize_audio, auto_translate):
-    if not script_text or not script_text.strip():
-        gr.Error("Please enter script text")
-        return None, None, "No script text", {}
-    speaker_voices = {}
-    for line in speaker_config_text.strip().split('\n'):
+def parse_speaker_config(config_text, voice_names):
+    """Parse speaker config textbox into dict - like multispeaker.py"""
+    speakers = {}
+    for line in config_text.strip().split('\n'):
         line = line.strip()
         if ':' in line:
             parts = line.split(':', 1)
             if len(parts) == 2:
-                speaker_voices[parts[0].strip()] = parts[1].strip()
+                speaker = parts[0].strip()
+                voice = parts[1].strip()
+                if voice in voice_names:  # Validate voice
+                    speakers[speaker] = voice
+    return speakers
+
+def process_raw_text_multispeaker(script_text, speaker_config_text, voice_names, language, speed, pause_duration, normalize_audio, auto_translate):
+    if not script_text or not script_text.strip():
+        gr.Error("Please enter script text")
+        return None, None, "No script text"
+    
+    # Parse speaker config (like multispeaker.py)
+    speaker_voices = parse_speaker_config(speaker_config_text, voice_names)
+    
     script_lines, detected_speakers = parse_raw_script(script_text)
     if not script_lines:
         gr.Error("Could not parse script")
-        return None, None, "❌ Parse error", {}
+        return None, None, "❌ Parse error"
+    
+    # Add missing speakers with default voice
     for speaker in detected_speakers:
         if speaker not in speaker_voices:
             speaker_voices[speaker] = "af_bella"
+    
     if auto_translate:
         try:
             lang_code = LANGUAGE_MAP_LOCAL.get(language, "en")
@@ -253,27 +256,30 @@ def process_raw_text_multispeaker(script_text, speaker_config_text, language, sp
                     line["text"] = GoogleTranslator(target=lang_code).translate(line["text"])
         except:
             gr.Warning("Translation failed")
+    
     output_path = create_multispeaker_audio(script_lines, speaker_voices, language, speed, pause_duration, normalize_audio)
+    
     info_lines = [f"### 📋 Generated", f"- **Speakers:** {len(detected_speakers)}", f"- **Lines:** {len([l for l in script_lines if l['speaker'] != '_PAUSE_'])}"]
     info_lines.append(f"### 🎭 Voices:")
     for speaker, voice in speaker_voices.items():
         info_lines.append(f"- **{speaker}:** `{voice}`")
+    
     if output_path:
-        return output_path, output_path, "\n".join(info_lines), speaker_voices
-    return None, None, "❌ Generation failed", speaker_voices
+        return output_path, output_path, "\n".join(info_lines)
+    return None, None, "❌ Generation failed"
 
-def update_speaker_config(script, current_config):
+def auto_update_speaker_config(script, current_config, voice_names):
+    """Auto-update speaker config when script changes - preserves existing voice assignments"""
     _, speakers = parse_raw_script(script)
-    voices = {}
-    for line in current_config.strip().split('\n'):
-        if ':' in line:
-            parts = line.split(':', 1)
-            if len(parts) == 2:
-                voices[parts[0].strip()] = parts[1].strip()
+    current_voices = parse_speaker_config(current_config, voice_names)
+    
+    # Add new speakers with default voice, keep existing assignments
     for speaker in speakers:
-        if speaker not in voices:
-            voices[speaker] = "af_bella"
-    return '\n'.join([f"{s}:{v}" for s, v in voices.items()])
+        if speaker not in current_voices:
+            current_voices[speaker] = "af_bella"
+    
+    # Format back to textbox format
+    return '\n'.join([f"{s}:{v}" for s, v in current_voices.items()])
 
 # ==================== SRT Dubbing ====================
 
@@ -395,16 +401,22 @@ def create_ui():
                     with gr.Column(scale=1):
                         gr.Markdown("### 📝 Script")
                         gr.Markdown("**Format:** `Speaker: text` | `{pause: 0.5}`")
-                        raw_script = gr.Textbox(label="", placeholder="""Speaker 1: Hello there!
+                        raw_script = gr.Textbox(label="", 
+                            placeholder="""Speaker 1: Hello there!
 Speaker 2: Hi, how are you?
 Speaker 1: I'm doing great!
 {pause: 0.5}
 Speaker 2: That's wonderful!""", lines=12)
+                    
                     with gr.Column(scale=1):
                         gr.Markdown("### 🎭 Speaker Voices")
-                        gr.Markdown("Format: `Speaker:voice`")
-                        speaker_config = gr.Textbox(label="Speaker Config", 
-                            value="Speaker 1:af_bella\nSpeaker 2:bf_isabella", lines=6)
+                        gr.Markdown("**Format:** `Speaker:voice` (dropdown-style selection)")
+                        speaker_config = gr.Textbox(
+                            label="Speaker Configuration",
+                            value="Speaker 1:af_bella\nSpeaker 2:bf_isabella",
+                            lines=6,
+                            info="Edit voices here - auto-updates when script changes"
+                        )
                 
                 with gr.Row():
                     raw_language = gr.Dropdown(choices=list(LANGUAGE_MAP.keys()), label="🌍 Language", value="American English")
@@ -421,10 +433,17 @@ Speaker 2: That's wonderful!""", lines=12)
                 raw_audio_file = gr.File(label="📥 Download")
                 raw_info = gr.Markdown("Click Generate...")
                 
-                raw_script.change(fn=update_speaker_config, inputs=[raw_script, speaker_config], outputs=[speaker_config])
+                # Auto-update speaker config when script changes (preserves voice assignments)
+                raw_script.change(
+                    fn=auto_update_speaker_config,
+                    inputs=[raw_script, speaker_config, gr.State(value=voice_names)],
+                    outputs=[speaker_config]
+                )
+                
+                # Generate audio
                 raw_generate.click(fn=process_raw_text_multispeaker,
-                    inputs=[raw_script, speaker_config, raw_language, raw_speed, raw_pause, raw_normalize, raw_translate],
-                    outputs=[raw_audio, raw_audio_file, raw_info, speaker_config])
+                    inputs=[raw_script, speaker_config, gr.State(value=voice_names), raw_language, raw_speed, raw_pause, raw_normalize, raw_translate],
+                    outputs=[raw_audio, raw_audio_file, raw_info])
                 
                 gr.Examples(examples=[
                     ["""Speaker 1: Welcome to our podcast!
@@ -460,7 +479,7 @@ John: Awesome! Let's celebrate."""],
                     inputs=[srt_input, srt_speaker_config, srt_language, srt_speed, srt_match_timing, srt_translate, srt_target_language],
                     outputs=[srt_audio, srt_srt_file, srt_audio_file, srt_info])
         
-        gr.Markdown("\n---\n### 💡 Tips\n- **Single Speaker:** Quick TTS\n- **Raw Text:** `Speaker: text` format, `{pause: 0.5}` for pauses\n- **SRT Dubbing:** Generate audio from subtitles")
+        gr.Markdown("\n---\n### 💡 Tips\n- **Single Speaker:** Select voice from dropdown → Generate\n- **Raw Text:** `Speaker: text` format, `{pause: 0.5}` for pauses. Edit `Speaker:voice` in right panel\n- **SRT Dubbing:** Generate audio from subtitles")
     
     return demo
 
