@@ -1,10 +1,9 @@
 """
 Kokoro TTS Studio - A comprehensive Gradio UI for Kokoro TTS
-Four tabs:
+Three tabs:
 1. Single Speaker
 2. Multi Speaker – Raw Text
-3. Multi Speaker – Script Editor
-4. SRT Dubbing
+3. SRT Dubbing
 """
 
 import os
@@ -20,9 +19,6 @@ from pydub import AudioSegment
 import gradio as gr
 from deep_translator import GoogleTranslator
 import pysrt
-import librosa
-import soundfile as sf
-from tqdm.auto import tqdm
 import math
 
 # ==================== Global Variables ====================
@@ -113,6 +109,9 @@ def generate_audio_single(text, voice, language="American English", speed=1.0):
     """Generate audio for single speaker."""
     global pipeline, last_used_language
     
+    if not text.strip():
+        return None
+    
     text = clean_text(text)
     lang_code = LANGUAGE_MAP.get(language, "a")
     
@@ -120,8 +119,8 @@ def generate_audio_single(text, voice, language="American English", speed=1.0):
         try:
             pipeline = KPipeline(lang_code=lang_code)
             last_used_language = lang_code
-        except Exception:
-            gr.Warning(f"Fallback to English")
+        except Exception as e:
+            gr.Warning(f"Fallback to English: {str(e)}")
             pipeline = KPipeline(lang_code="a")
             last_used_language = "a"
     
@@ -136,6 +135,7 @@ def generate_audio_single(text, voice, language="American English", speed=1.0):
             audio_chunks.append(audio_int16.tobytes())
         
         if not audio_chunks:
+            gr.Error("No audio generated. Check if text is valid.")
             return None
         
         combined_audio = b''.join(audio_chunks)
@@ -157,6 +157,9 @@ def generate_audio_single(text, voice, language="American English", speed=1.0):
 def generate_speaker_audio(text, voice, language="American English", speed=1.0):
     """Generate audio for a speaker line."""
     global pipeline, last_used_language
+    
+    if not text.strip():
+        return None, 0
     
     text = clean_text(text)
     lang_code = LANGUAGE_MAP.get(language, "a")
@@ -203,10 +206,14 @@ def create_multispeaker_audio(script_lines, speaker_voices, language="American E
         text = line_data.get("text")
         pause_override = line_data.get("pause")
         
+        # Skip pause directives
+        if speaker == "_PAUSE_":
+            continue
+        
         voice = speaker_voices.get(speaker)
         if not voice:
-            gr.Warning(f"No voice assigned for speaker '{speaker}', skipping...")
-            continue
+            gr.Warning(f"No voice assigned for speaker '{speaker}', using af_bella")
+            voice = "af_bella"
         
         audio_array, duration = generate_speaker_audio(text, voice, language, speed)
         
@@ -234,11 +241,12 @@ def create_multispeaker_audio(script_lines, speaker_voices, language="American E
                 normalized_audio.append(item)
         all_audio = normalized_audio
     
-    # Combine audio
+    # Combine audio with pauses
     combined = []
     for i, item in enumerate(all_audio):
         combined.append(item["audio"])
         
+        # Determine pause duration
         if item["pause"] is not None:
             pause_samples = int(24000 * item["pause"])
         elif i < len(all_audio) - 1:
@@ -269,9 +277,9 @@ def create_multispeaker_audio(script_lines, speaker_voices, language="American E
 
 def process_single_speaker(text, voice, speaker_name, language, speed, auto_translate):
     """Process single speaker TTS."""
-    if not text.strip():
+    if not text or not text.strip():
         gr.Error("Please enter some text")
-        return None, None
+        return None, "❌ No text entered"
     
     if auto_translate:
         try:
@@ -299,13 +307,13 @@ def parse_raw_script(script_text):
         if not line:
             continue
         
-        # Check for pause directive
-        pause_match = re.match(r'^\{pause:\s*([\d.]+)\}', line)
+        # Check for pause directive FIRST - before checking for speaker format
+        pause_match = re.match(r'^\{pause:\s*([\d.]+)\}$', line)
         if pause_match:
-            lines.append({"speaker": "_PAUSE_", "text": line, "pause": float(pause_match.group(1))})
+            lines.append({"speaker": "_PAUSE_", "text": "", "pause": float(pause_match.group(1))})
             continue
         
-        # Try different formats
+        # Try speaker format: SpeakerName: text
         match = re.match(r'^([^:]+):\s*(.+)$', line)
         if match:
             speaker = match.group(1).strip()
@@ -313,7 +321,7 @@ def parse_raw_script(script_text):
             speakers.add(speaker)
             lines.append({"speaker": speaker, "text": text, "pause": None})
         else:
-            # Continuation of previous speaker
+            # Continuation of previous speaker (skip pause lines)
             if lines and lines[-1]["speaker"] != "_PAUSE_":
                 lines[-1]["text"] += " " + line
     
@@ -321,19 +329,22 @@ def parse_raw_script(script_text):
 
 def process_raw_text_multispeaker(script_text, speaker_voices, language, speed, pause_duration, normalize_audio, auto_translate):
     """Process raw text multi-speaker script."""
-    if not script_text.strip():
+    if not script_text or not script_text.strip():
         gr.Error("Please enter script text")
-        return None, None, "No script text entered"
+        return None, None, "No script text entered", {}
     
     # Parse script
     script_lines, detected_speakers = parse_raw_script(script_text)
     
     if not script_lines:
         gr.Error("Could not parse script. Use format: Speaker Name: dialogue")
-        return None, None, "❌ Could not parse script"
+        return None, None, "❌ Could not parse script", {}
+    
+    # Filter out pause-only lines for speaker detection
+    actual_speakers = [s for s in detected_speakers if s != "_PAUSE_"]
     
     # Ensure all speakers have voices
-    for speaker in detected_speakers:
+    for speaker in actual_speakers:
         if speaker not in speaker_voices:
             speaker_voices[speaker] = "af_bella"
     
@@ -359,8 +370,8 @@ def process_raw_text_multispeaker(script_text, speaker_voices, language, speed, 
     
     # Generate info
     info_lines = [f"### 📋 Generated Audio"]
-    info_lines.append(f"- **Speakers:** {len(detected_speakers)}")
-    info_lines.append(f"- **Lines:** {len(script_lines)}")
+    info_lines.append(f"- **Speakers:** {len(actual_speakers)}")
+    info_lines.append(f"- **Lines:** {len([l for l in script_lines if l['speaker'] != '_PAUSE_'])}")
     info_lines.append(f"- **Language:** {language}")
     info_lines.append(f"- **Speed:** {speed}x")
     info_lines.append("")
@@ -374,284 +385,59 @@ def process_raw_text_multispeaker(script_text, speaker_voices, language, speed, 
         return output_path, output_path, info, speaker_voices
     return None, None, "❌ Audio generation failed", speaker_voices
 
-# ==================== Multi Speaker - Script Editor Tab ====================
-
-def add_turn(turns_json, speakers_json, speaker_voices_json):
-    """Add a new turn to the script editor."""
-    turns = json.loads(turns_json) if turns_json else []
-    speakers = json.loads(speakers_json) if speakers_json else {}
-    speaker_voices = json.loads(speaker_voices_json) if speaker_voices_json else {}
+def update_raw_speaker_cards(script, current_voices):
+    """Update speaker cards when script changes."""
+    if not script or not script.strip():
+        return '<p class="no-speakers">Enter script text to see speaker cards</p>', current_voices if current_voices else {}
     
-    # Find next speaker number
-    speaker_num = 1
-    while f"Speaker {speaker_num}" in speakers:
-        speaker_num += 1
-    new_speaker = f"Speaker {speaker_num}"
+    _, speakers = parse_raw_script(script)
+    speakers = [s for s in speakers if s != "_PAUSE_"]
     
-    speakers[new_speaker] = True
-    if new_speaker not in speaker_voices:
-        speaker_voices[new_speaker] = "af_bella"
+    if not speakers:
+        return '<p class="no-speakers">No speakers detected. Use format: Speaker Name: dialogue</p>', current_voices if current_voices else {}
     
-    new_turn = {
-        "speaker": new_speaker,
-        "text": "Enter dialogue text here...",
-        "pause": None
-    }
-    turns.append(new_turn)
+    # Initialize voices for new speakers
+    if not current_voices:
+        current_voices = {}
+    for speaker in speakers:
+        if speaker not in current_voices:
+            current_voices[speaker] = "af_bella"
     
-    # Generate turn cards HTML
-    turn_cards = generate_turn_cards(turns, speakers, speaker_voices)
-    
-    return (turn_cards, json.dumps(turns), json.dumps(speakers), json.dumps(speaker_voices),
-            generate_raw_preview(turns))
-
-def remove_turn(turns_json, speakers_json, speaker_voices_json, turn_index):
-    """Remove a turn from the script editor."""
-    turns = json.loads(turns_json) if turns_json else []
-    speakers = json.loads(speakers_json) if speakers_json else {}
-    speaker_voices = json.loads(speaker_voices_json) if speaker_voices_json else {}
-    
-    if 0 <= turn_index < len(turns):
-        removed_speaker = turns[turn_index]["speaker"]
-        turns.pop(turn_index)
-        
-        # Remove speaker if no longer used
-        used_speakers = set(t["speaker"] for t in turns)
-        if removed_speaker not in used_speakers and removed_speaker.startswith("Speaker"):
-            speakers.pop(removed_speaker, None)
-            speaker_voices.pop(removed_speaker, None)
-    
-    turn_cards = generate_turn_cards(turns, speakers, speaker_voices)
-    return (turn_cards, json.dumps(turns), json.dumps(speakers), json.dumps(speaker_voices),
-            generate_raw_preview(turns))
-
-def clear_all_turns():
-    """Clear all turns."""
-    return ('<p class="no-speakers">Click "Add Turn" to start building your script</p>', 
-            '[]', '{}', '{}', '')
-
-def update_turn(turns_json, speakers_json, speaker_voices_json, turn_index, field, value):
-    """Update a turn's field."""
-    turns = json.loads(turns_json) if turns_json else []
-    speakers = json.loads(speakers_json) if speakers_json else {}
-    speaker_voices = json.loads(speaker_voices_json) if speaker_voices_json else {}
-    
-    if 0 <= turn_index < len(turns):
-        if field == "speaker":
-            turns[turn_index]["speaker"] = value
-        elif field == "text":
-            turns[turn_index]["text"] = value
-        elif field == "pause":
-            turns[turn_index]["pause"] = float(value) if value else None
-    
-    return json.dumps(turns), generate_raw_preview(turns)
-
-def add_speaker(speakers_json, speaker_voices_json, speaker_name):
-    """Add a new speaker."""
-    speakers = json.loads(speakers_json) if speakers_json else {}
-    speaker_voices = json.loads(speaker_voices_json) if speaker_voices_json else {}
-    
-    if not speaker_name or not speaker_name.strip():
-        gr.Warning("Please enter a speaker name")
-        return json.dumps(speakers), json.dumps(speaker_voices), ""
-    
-    speaker_name = speaker_name.strip()
-    if speaker_name in speakers:
-        gr.Warning("Speaker already exists")
-        return json.dumps(speakers), json.dumps(speaker_voices), ""
-    
-    speakers[speaker_name] = True
-    speaker_voices[speaker_name] = "af_bella"
-    
-    return json.dumps(speakers), json.dumps(speaker_voices), ""
-
-def remove_speaker(speakers_json, speaker_voices_json, turns_json, speaker_name):
-    """Remove a speaker."""
-    speakers = json.loads(speakers_json) if speakers_json else {}
-    speaker_voices = json.loads(speaker_voices_json) if speaker_voices_json else {}
-    turns = json.loads(turns_json) if turns_json else []
-    
-    # Check if speaker is used
-    used_speakers = set(t["speaker"] for t in turns)
-    if speaker_name in used_speakers:
-        gr.Warning("Cannot remove speaker that is used in turns. Remove or reassign the turns first.")
-        return json.dumps(speakers), json.dumps(speaker_voices)
-    
-    speakers.pop(speaker_name, None)
-    speaker_voices.pop(speaker_name, None)
-    
-    return json.dumps(speakers), json.dumps(speaker_voices)
-
-def update_speaker_voice(speaker_voices_json, speaker_name, voice):
-    """Update a speaker's voice."""
-    speaker_voices = json.loads(speaker_voices_json) if speaker_voices_json else {}
-    speaker_voices[speaker_name] = voice
-    return json.dumps(speaker_voices)
-
-def generate_turn_cards(turns, speakers, speaker_voices):
-    """Generate HTML for turn cards."""
-    if not turns:
-        return '<p class="no-speakers">Click "Add Turn" to start building your script</p>'
-    
-    colors = ["#4285f4", "#34a853", "#fbbc04", "#ea4335", "#9c27b0", "#00bcd4", "#ff5722"]
-    speaker_list = list(speakers.keys())
-    
+    # Generate cards
     cards = []
-    for i, turn in enumerate(turns):
-        speaker = turn["speaker"]
-        text = turn["text"]
-        pause = turn.get("pause")
+    for speaker in speakers:
+        voice = current_voices.get(speaker, "af_bella")
         
-        speaker_idx = speaker_list.index(speaker) if speaker in speaker_list else 0
-        color = colors[speaker_idx % len(colors)]
+        voice_opts = ""
+        for cat, voices in VOICE_CATEGORIES.items():
+            voice_opts += f'<optgroup label="{cat}">'
+            for v in voices:
+                sel = 'selected' if v == voice else ''
+                voice_opts += f'<option value="{v}" {sel}>{v}</option>'
+            voice_opts += '</optgroup>'
         
-        speaker_options = "".join([f'<option value="{s}" {"selected" if s == speaker else ""}>{s}</option>' 
-                                  for s in speakers.keys()])
-        
-        pause_html = ""
-        if pause is not None:
-            pause_html = f'''
-            <div style="margin-top: 8px;">
-                <label style="color: var(--text-secondary); font-size: 12px;">Pause: </label>
-                <input type="number" class="gr-input" step="0.1" min="0" value="{pause}" 
-                       onchange="updateTurnPause({i}, this.value)" style="width: 80px; display: inline-block;">
-                <button onclick="removeTurnPause({i})" style="margin-left: 8px; background: var(--accent-red); color: white; border: none; padding: 4px 8px; border-radius: 4px; cursor: pointer;">✕</button>
-            </div>
-            '''
-        else:
-            pause_html = f'''
-            <button onclick="addTurnPause({i})" style="margin-top: 8px; background: var(--bg-secondary); border: 1px solid var(--border-color); color: var(--text-secondary); padding: 4px 8px; border-radius: 4px; cursor: pointer; font-size: 12px;">+ Add Pause</button>
-            '''
-        
-        card = f'''
-        <div class="turn-card" data-turn="{i}">
-            <div class="speaker-dot" style="background: {color};"></div>
-            <div class="turn-content">
-                <select class="turn-speaker-select" data-turn="{i}" onchange="updateTurnSpeaker({i}, this.value)">
-                    {speaker_options}
-                </select>
-                <textarea class="turn-text-input" data-turn="{i}" rows="2" oninput="updateTurnText({i}, this.value)">{text}</textarea>
-                {pause_html}
-            </div>
-            <button class="remove-turn-btn" onclick="removeTurn({i})">🗑️</button>
-        </div>
-        '''
-        cards.append(card)
-    
-    return ''.join(cards)
-
-def generate_speaker_cards(speakers, speaker_voices, turns_json):
-    """Generate HTML for speaker cards."""
-    speakers_dict = json.loads(speakers_json) if speakers_json else {}
-    speaker_voices_dict = json.loads(speaker_voices_json) if speaker_voices_json else {}
-    
-    if not speakers_dict:
-        return '<p class="no-speakers">Add turns to see speaker cards</p>'
-    
-    cards = []
-    for speaker in speakers_dict.keys():
-        current_voice = speaker_voices_dict.get(speaker, "af_bella")
-        
-        voice_options = ""
-        for category, voices in VOICE_CATEGORIES.items():
-            voice_options += f'<optgroup label="{category}">'
-            for voice in voices:
-                selected = 'selected' if voice == current_voice else ''
-                voice_options += f'<option value="{voice}" {selected}>{voice}</option>'
-            voice_options += '</optgroup>'
-        
-        card = f'''
+        cards.append(f'''
         <div class="speaker-card" data-speaker="{speaker}">
             <div class="speaker-card-header">
-                <input type="text" class="speaker-name-input" value="{speaker}" 
-                       placeholder="Speaker Name" onchange="renameSpeaker('{speaker}', this.value)">
-                <button class="remove-speaker-btn" onclick="removeSpeaker('{speaker}')">🗑️ Remove</button>
+                <span style="color: var(--text-primary); font-weight: bold;">{speaker}</span>
             </div>
             <div class="speaker-voice-select">
                 <label style="color: var(--text-secondary); font-size: 12px; margin-bottom: 4px; display: block;">Voice:</label>
-                <select class="voice-dropdown" data-speaker="{speaker}" onchange="updateSpeakerVoice('{speaker}', this.value)">
-                    {voice_options}
+                <select class="voice-dropdown" data-speaker="{speaker}" onchange="window.rawVoice_{speaker} = this.value">
+                    {voice_opts}
                 </select>
             </div>
         </div>
-        '''
-        cards.append(card)
+        ''')
     
-    return ''.join(cards)
+    return ''.join(cards), current_voices
 
-def generate_raw_preview(turns):
-    """Generate raw script preview from turns."""
-    if not turns:
-        return ""
-    
-    lines = []
-    for turn in turns:
-        speaker = turn.get("speaker", "Speaker")
-        text = turn.get("text", "")
-        pause = turn.get("pause")
-        
-        lines.append(f"{speaker}: {text}")
-        if pause is not None:
-            lines.append(f"{{pause: {pause}}}")
-    
-    return "\n".join(lines)
-
-def process_script_editor(turns_json, speakers_json, speaker_voices_json, 
-                          language, speed, pause_duration, normalize_audio, auto_translate):
-    """Process script editor multi-speaker."""
-    turns = json.loads(turns_json) if turns_json else []
-    speakers = json.loads(speakers_json) if speakers_json else {}
-    speaker_voices = json.loads(speaker_voices_json) if speaker_voices_json else {}
-    
-    if not turns:
-        gr.Error("Please add at least one turn")
-        return None, None, "No turns added", ""
-    
-    script_lines = []
-    for turn in turns:
-        script_lines.append({
-            "speaker": turn.get("speaker", "Speaker 1"),
-            "text": turn.get("text", ""),
-            "pause": turn.get("pause")
-        })
-    
-    # Translate if requested
-    if auto_translate:
-        try:
-            lang_code = LANGUAGE_MAP_LOCAL.get(language, "en")
-            for line in script_lines:
-                if line["text"]:
-                    line["text"] = GoogleTranslator(target=lang_code).translate(line["text"])
-        except Exception:
-            gr.Warning("Translation failed for some lines")
-    
-    # Generate audio
-    output_path = create_multispeaker_audio(
-        script_lines=script_lines,
-        speaker_voices=speaker_voices,
-        language=language,
-        speed=speed,
-        pause_between_lines=pause_duration,
-        normalize_volumes=normalize_audio
-    )
-    
-    # Generate info
-    info_lines = [f"### 📋 Generated Audio"]
-    info_lines.append(f"- **Speakers:** {len(speakers)}")
-    info_lines.append(f"- **Turns:** {len(script_lines)}")
-    info_lines.append(f"- **Language:** {language}")
-    info_lines.append(f"- **Speed:** {speed}x")
-    info_lines.append("")
-    info_lines.append("### 🎭 Speaker Voices:")
-    for speaker, voice in speaker_voices.items():
-        info_lines.append(f"- **{speaker}:** `{voice}`")
-    
-    info = "\n".join(info_lines)
-    raw_preview = generate_raw_preview(turns)
-    
-    if output_path:
-        return output_path, output_path, info, raw_preview
-    return None, None, "❌ Audio generation failed", raw_preview
+def update_raw_voice(speaker, voice, current_voices):
+    """Update voice for a speaker."""
+    if not current_voices:
+        current_voices = {}
+    current_voices[speaker] = voice
+    return current_voices
 
 # ==================== SRT Dubbing Tab ====================
 
@@ -677,9 +463,12 @@ def create_srt_audio(subs, speaker_voices, language="American English", speed=1.
     output_dir = "./kokoro_output"
     os.makedirs(output_dir, exist_ok=True)
     
+    # Get default voice
+    speaker_names = list(speaker_voices.keys())
+    default_voice = speaker_voices.get(speaker_names[0], "af_bella") if speaker_names else "af_bella"
+    
     # Generate audio for each subtitle
     audio_segments = []
-    timing_data = []
     
     for i, sub in enumerate(subs):
         text = sub.text.replace('\n', ' ')
@@ -693,16 +482,20 @@ def create_srt_audio(subs, speaker_voices, language="American English", speed=1.
             except Exception:
                 gr.Warning(f"Translation failed for subtitle {i+1}")
         
-        # Get voice for this subtitle (use first speaker or cycle through)
-        speaker_names = list(speaker_voices.keys())
-        voice = speaker_voices.get(speaker_names[0], "af_bella") if speaker_names else "af_bella"
-        
-        # Calculate speed adjustment to match timing
+        # Calculate duration needed
         duration_needed = (sub.end.ordinal - sub.start.ordinal) / 1000.0
         
         # Generate audio
         try:
-            generator = pipeline(text, voice=voice, speed=speed, split_pattern=r'\n+')
+            # Try to match timing by adjusting speed
+            effective_speed = speed
+            if match_timing and duration_needed > 0:
+                # Estimate: ~15 characters per second at normal speed
+                estimated_duration = len(text) / 15.0
+                if estimated_duration > duration_needed:
+                    effective_speed = min(speed * (estimated_duration / duration_needed), 2.0)
+            
+            generator = pipeline(text, voice=default_voice, speed=effective_speed, split_pattern=r'\n+')
             audio_chunks = []
             
             for result in generator:
@@ -714,37 +507,7 @@ def create_srt_audio(subs, speaker_voices, language="American English", speed=1.
             if audio_chunks:
                 combined_audio = b''.join(audio_chunks)
                 audio_array = np.frombuffer(combined_audio, dtype=np.int16)
-                
-                # Adjust speed if match_timing is enabled
-                if match_timing:
-                    current_duration = len(audio_array) / 24000.0
-                    if current_duration > 0 and duration_needed > 0:
-                        speed_factor = current_duration / duration_needed
-                        if speed_factor > 1.5:
-                            speed_factor = 1.5
-                        elif speed_factor < 0.7:
-                            speed_factor = 0.7
-                        
-                        # Regenerate with adjusted speed
-                        adjusted_speed = speed * speed_factor
-                        generator = pipeline(text, voice=voice, speed=adjusted_speed, split_pattern=r'\n+')
-                        audio_chunks = []
-                        for result in generator:
-                            audio = result.audio
-                            audio_np = audio.numpy()
-                            audio_int16 = (audio_np * 32767).astype(np.int16)
-                            audio_chunks.append(audio_int16.tobytes())
-                        
-                        if audio_chunks:
-                            combined_audio = b''.join(audio_chunks)
-                            audio_array = np.frombuffer(combined_audio, dtype=np.int16)
-                
                 audio_segments.append(audio_array)
-                timing_data.append({
-                    "start": sub.start.ordinal,
-                    "end": sub.end.ordinal,
-                    "text": text
-                })
         except Exception as e:
             gr.Warning(f"Failed to generate audio for subtitle {i+1}: {str(e)}")
     
@@ -964,27 +727,6 @@ def create_ui():
         font-family: inherit !important;
     }
     
-    .turn-pause-input {
-        background: var(--bg-secondary) !important;
-        border: 1px solid var(--border-color) !important;
-        color: var(--text-primary) !important;
-        padding: 6px 10px !important;
-        border-radius: 6px !important;
-        width: 100px !important;
-        margin-top: 8px !important;
-    }
-    
-    .remove-turn-btn {
-        background: var(--accent-red) !important;
-        color: white !important;
-        border: none !important;
-        padding: 8px 16px !important;
-        border-radius: 6px !important;
-        cursor: pointer !important;
-        flex-shrink: 0 !important;
-        height: fit-content !important;
-    }
-    
     .raw-preview {
         background: var(--bg-card) !important;
         border: 1px solid var(--border-color) !important;
@@ -1004,11 +746,6 @@ def create_ui():
         text-align: center !important;
     }
     
-    .turns-container {
-        max-height: 500px;
-        overflow-y: auto !important;
-    }
-    
     .speaker-cards-container {
         max-height: 400px;
         overflow-y: auto !important;
@@ -1024,57 +761,15 @@ def create_ui():
     }
     """
     
-    # JavaScript for interactivity
-    js_code = """
-    <script>
-    function updateTurnSpeaker(index, value) {
-        // Trigger Gradio update
-        const turnsState = document.querySelector('.turns-state textarea');
-        if (turnsState) {
-            // The actual update happens via Gradio's onchange
-        }
-    }
-    
-    function updateTurnText(index, value) {
-        // Live update handled by Gradio
-    }
-    
-    function addTurnPause(index) {
-        // Trigger pause addition
-    }
-    
-    function removeTurnPause(index) {
-        // Trigger pause removal
-    }
-    
-    function removeTurn(index) {
-        // Trigger turn removal via Gradio
-    }
-    
-    function renameSpeaker(oldName, newName) {
-        // Trigger speaker rename
-    }
-    
-    function removeSpeaker(name) {
-        // Trigger speaker removal
-    }
-    
-    function updateSpeakerVoice(name, voice) {
-        // Trigger voice update
-    }
-    </script>
-    """
+    # Get voice list
+    voice_names = get_voice_names()
     
     with gr.Blocks(css=custom_css, title="Kokoro TTS Studio", theme=gr.themes.Base()) as demo:
-        gr.HTML(js_code)
-        
         gr.Markdown("""
         # 🎙️ Kokoro TTS Studio
         
         Professional text-to-speech interface with dark theme
         """)
-        
-        voice_names = get_voice_names()
         
         with gr.Tabs() as tabs:
             # ==================== Single Speaker Tab ====================
@@ -1091,7 +786,8 @@ def create_ui():
                         single_voice = gr.Dropdown(
                             choices=voice_names,
                             label="🎙️ Voice",
-                            value="af_bella"
+                            value="af_bella",
+                            interactive=True
                         )
                         
                         single_speaker_name = gr.Textbox(
@@ -1145,6 +841,14 @@ def create_ui():
                     ],
                     inputs=[single_text, single_voice, single_speaker_name]
                 )
+                
+                # Connect generate button
+                single_generate.click(
+                    fn=process_single_speaker,
+                    inputs=[single_text, single_voice, single_speaker_name, single_language, 
+                           single_speed, single_translate],
+                    outputs=[single_audio, single_info]
+                )
             
             # ==================== Multi Speaker - Raw Text Tab ====================
             with gr.TabItem("👥 Multi Speaker – Raw Text", id="multi_raw"):
@@ -1170,49 +874,11 @@ Speaker 2: That sounds wonderful!""",
                     
                     with gr.Column(scale=1):
                         gr.Markdown("### 🎭 Speaker Voices")
-                        raw_speaker_voices = gr.JSON(value={"Speaker1": "af_bella", "Speaker2": "bf_isabella"}, visible=False)
                         
-                        def update_raw_cards(script, current_voices):
-                            _, speakers = parse_raw_script(script)
-                            if not speakers:
-                                return '<p class="no-speakers">Enter script text to see speaker cards</p>', current_voices
-                            
-                            # Update voices
-                            for spk in speakers:
-                                if spk not in current_voices:
-                                    current_voices[spk] = "af_bella"
-                            
-                            cards = []
-                            for speaker in speakers:
-                                voice = current_voices.get(speaker, "af_bella")
-                                voice_opts = ""
-                                for cat, voices in VOICE_CATEGORIES.items():
-                                    voice_opts += f'<optgroup label="{cat}">'
-                                    for v in voices:
-                                        sel = 'selected' if v == voice else ''
-                                        voice_opts += f'<option value="{v}" {sel}>{v}</option>'
-                                    voice_opts += '</optgroup>'
-                                
-                                cards.append(f'''
-                                <div class="speaker-card" data-speaker="{speaker}">
-                                    <div class="speaker-card-header">
-                                        <span style="color: var(--text-primary); font-weight: bold;">{speaker}</span>
-                                    </div>
-                                    <div class="speaker-voice-select">
-                                        <label style="color: var(--text-secondary); font-size: 12px; margin-bottom: 4px; display: block;">Voice:</label>
-                                        <select class="voice-dropdown" data-speaker="{speaker}" onchange="updateRawVoice('{speaker}', this.value)">
-                                            {voice_opts}
-                                        </select>
-                                    </div>
-                                </div>
-                                ''')
-                            
-                            return ''.join(cards), current_voices
+                        # Hidden state for speaker voices
+                        raw_voice_state = gr.JSON(value={})
                         
                         raw_speaker_cards = gr.HTML(value='<p class="no-speakers">Enter script text to see speaker cards</p>')
-                        
-                        # Hidden state for JS updates
-                        raw_voice_state = gr.JSON(value={}, visible=False)
                 
                 with gr.Row():
                     raw_language = gr.Dropdown(
@@ -1248,12 +914,12 @@ Speaker 2: That sounds wonderful!""",
                 
                 # Update speaker cards on script change
                 raw_script.change(
-                    fn=update_raw_cards,
+                    fn=update_raw_speaker_cards,
                     inputs=[raw_script, raw_voice_state],
                     outputs=[raw_speaker_cards, raw_voice_state]
                 )
                 
-                # Generate audio
+                # Generate audio - pass voice_state directly
                 raw_generate.click(
                     fn=process_raw_text_multispeaker,
                     inputs=[raw_script, raw_voice_state, raw_language, raw_speed, 
@@ -1280,123 +946,6 @@ Villain: Not if I find it first!
 Narrator: The battle was about to begin."""],
                     ],
                     inputs=[raw_script]
-                )
-            
-            # ==================== Multi Speaker - Script Editor Tab ====================
-            with gr.TabItem("✏️ Multi Speaker – Script Editor", id="multi_editor"):
-                with gr.Row():
-                    with gr.Column(scale=2):
-                        gr.Markdown("### 📝 Visual Script Builder")
-                        
-                        # Turn cards container
-                        turn_cards_html = gr.HTML(
-                            value='<p class="no-speakers">Click "Add Turn" to start building your script</p>',
-                            elem_classes=["turns-container"]
-                        )
-                        
-                        with gr.Row():
-                            add_turn_btn = gr.Button("➕ Add Turn", size="sm")
-                            clear_turns_btn = gr.Button("🗑️ Clear All", size="sm")
-                        
-                        # Hidden state
-                        turns_state = gr.JSON(value=[], visible=False, elem_classes=["turns-state"])
-                        speakers_state = gr.JSON(value={}, visible=False)
-                        speaker_voices_state = gr.JSON(value={}, visible=False)
-                        
-                        gr.Markdown("### 📄 Raw Script Preview")
-                        raw_preview = gr.Textbox(
-                            label="",
-                            lines=6,
-                            interactive=False,
-                            elem_classes=["raw-preview"]
-                        )
-                    
-                    with gr.Column(scale=1):
-                        gr.Markdown("### 🎭 Speaker Voices")
-                        
-                        speaker_cards_html = gr.HTML(
-                            value='<p class="no-speakers">Add turns to see speaker cards</p>',
-                            elem_classes=["speaker-cards-container"]
-                        )
-                        
-                        with gr.Row():
-                            add_speaker_btn = gr.Button("➕ Add Speaker", size="sm")
-                        new_speaker_name = gr.Textbox(
-                            label="New Speaker Name",
-                            placeholder="Enter speaker name",
-                            visible=False
-                        )
-                
-                with gr.Row():
-                    editor_language = gr.Dropdown(
-                        choices=list(LANGUAGE_MAP.keys()),
-                        label="🌍 Language",
-                        value="American English"
-                    )
-                    editor_speed = gr.Slider(
-                        minimum=0.5,
-                        maximum=2.0,
-                        value=1.0,
-                        step=0.1,
-                        label="⚡ Speed"
-                    )
-                    editor_pause = gr.Slider(
-                        minimum=0.0,
-                        maximum=2.0,
-                        value=0.2,
-                        step=0.1,
-                        label="⏸️ Pause Between Lines (seconds)"
-                    )
-                
-                with gr.Row():
-                    editor_normalize = gr.Checkbox(label="🔊 Normalize Speaker Volumes", value=True)
-                    editor_translate = gr.Checkbox(label="🌐 Auto-translate to target language", value=False)
-                
-                editor_generate = gr.Button("🚀 Generate Audio", variant="primary", size="lg")
-                
-                gr.Markdown("### 🎧 Output")
-                editor_audio = gr.Audio(label="Generated Audio", type="filepath", autoplay=True)
-                editor_audio_file = gr.File(label="📥 Download Audio")
-                editor_info = gr.Markdown("Click Generate to create multi-speaker audio...")
-                
-                # Add turn
-                add_turn_btn.click(
-                    fn=add_turn,
-                    inputs=[turns_state, speakers_state, speaker_voices_state],
-                    outputs=[turn_cards_html, turns_state, speakers_state, speaker_voices_state, raw_preview]
-                )
-                
-                # Clear turns
-                clear_turns_btn.click(
-                    fn=clear_all_turns,
-                    outputs=[turn_cards_html, turns_state, speakers_state, speaker_voices_state, raw_preview]
-                )
-                
-                # Add speaker
-                add_speaker_btn.click(
-                    fn=add_speaker,
-                    inputs=[speakers_state, speaker_voices_state, new_speaker_name],
-                    outputs=[speakers_state, speaker_voices_state, new_speaker_name]
-                )
-                
-                # Generate
-                editor_generate.click(
-                    fn=process_script_editor,
-                    inputs=[turns_state, speakers_state, speaker_voices_state,
-                           editor_language, editor_speed, editor_pause, editor_normalize, editor_translate],
-                    outputs=[editor_audio, editor_audio_file, editor_info, raw_preview]
-                )
-                
-                gr.Examples(
-                    examples=[
-                        [{"speaker": "Speaker 1", "text": "Hello! Welcome to our demo.", "pause": None},
-                         {"speaker": "Speaker 2", "text": "This is the script editor!", "pause": None},
-                         {"speaker": "Speaker 1", "text": "You can add turns and assign voices.", "pause": 0.5}],
-                        [{"speaker": "Host", "text": "Welcome back to the show!", "pause": None},
-                         {"speaker": "Guest", "text": "Thanks for having me!", "pause": 0.3},
-                         {"speaker": "Host", "text": "Let's talk about your new project.", "pause": None}],
-                    ],
-                    inputs=[turns_state]
                 )
             
             # ==================== SRT Dubbing Tab ====================
@@ -1488,8 +1037,7 @@ Narrator: The battle was about to begin."""],
         ---
         ### 💡 Tips
         - **Single Speaker:** Quick TTS with any voice
-        - **Raw Text:** Paste dialogue in `Speaker: text` format
-        - **Script Editor:** Visual builder with colored turns
+        - **Raw Text:** Paste dialogue in `Speaker: text` format, use `{pause: 0.5}` for pauses
         - **SRT Dubbing:** Generate audio from subtitle files
         
         **Voice Categories:**
