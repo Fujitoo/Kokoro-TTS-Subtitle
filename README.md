@@ -10,6 +10,31 @@ Alternative ways to use Kokoro-TTS [kokoro-onnx](https://github.com/thewh1teagle
 
 ![srt dub](https://github.com/user-attachments/assets/04a0a26f-ca3a-404a-b642-ccdf23938e9a)
 
+## Features
+
+### 🎭 Multi-Speaker Studio (NEW!)
+Create natural dialogues and conversations with multiple speakers!
+- Assign different voices to each speaker
+- Write scripts with speaker labels
+- Automatic volume normalization
+- Custom pause control for dramatic timing
+- Inline voice overrides
+
+See [MULTISPEAKER_README.md](MULTISPEAKER_README.md) for detailed documentation.
+
+### 📝 Multilingual TTS
+- Support for 9 languages
+- Multiple voices per language
+- Word-level and sentence-level SRT generation
+- Audio speed control
+- Text translation
+
+### 🎬 SRT Dubbing
+- Generate audio from subtitle files
+- Match speaker timing automatically
+- Translate subtitles to target language
+- Preserve original speaker pacing
+
 ## Installation
 
 ### Prerequisites
